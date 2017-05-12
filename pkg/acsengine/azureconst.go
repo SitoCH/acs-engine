@@ -145,6 +145,7 @@ func GetDCOSMasterAllowedSizes() string {
 func GetMasterAgentAllowedSizes() string {
 	return `      "allowedValues": [
         "Standard_A1",
+        "Standard_A1_v2",
         "Standard_A10",
         "Standard_A11",
         "Standard_A2",
@@ -368,6 +369,9 @@ func GetKubernetesAgentAllowedSizes() string {
 func GetSizeMap() string {
 	return `    "vmSizesMap": {
       "Standard_A1": {
+        "storageAccountType": "Standard_LRS"
+      },
+      "Standard_A1_v2": {
         "storageAccountType": "Standard_LRS"
       },
       "Standard_A10": {
