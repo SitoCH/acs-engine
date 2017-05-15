@@ -199,6 +199,7 @@ func GetMasterAgentAllowedSizes() string {
         "Standard_DS14_v2",
         "Standard_DS14_v2_Promo",
         "Standard_DS15_v2",
+        "Standard_DS1_v2",
         "Standard_DS2",
         "Standard_DS2_v2",
         "Standard_DS2_v2_Promo",
