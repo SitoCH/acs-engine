@@ -1,20 +1,13 @@
 package armhelpers
 
 import (
-	"fmt"
-	"time"
-
 	"github.com/Azure/azure-sdk-for-go/arm/resources/resources"
-	"github.com/prometheus/common/log"
+	"github.com/Azure/go-autorest/autorest"
+	log "github.com/sirupsen/logrus"
 )
 
 // DeployTemplate implements the TemplateDeployer interface for the AzureClient client
 func (az *AzureClient) DeployTemplate(resourceGroupName, deploymentName string, template map[string]interface{}, parameters map[string]interface{}, cancel <-chan struct{}) (*resources.DeploymentExtended, error) {
-	// this is needed because either ARM or the SDK can't distinguish between past
-	// deployments and current deployments with the same deploymentName.
-	uniqueSuffix := fmt.Sprintf("-%d", time.Now().Unix())
-	deploymentName = deploymentName + uniqueSuffix
-
 	deployment := resources.Deployment{
 		Properties: &resources.DeploymentProperties{
 			Template:   &template,
@@ -23,7 +16,7 @@ func (az *AzureClient) DeployTemplate(resourceGroupName, deploymentName string, 
 		},
 	}
 
-	log.Infof("Starting ARM Deployment. This will take some time. deployment=%q", deploymentName)
+	log.Infof("Starting ARM Deployment (%s). This will take some time...", deploymentName)
 
 	resChan, errChan := az.deploymentsClient.CreateOrUpdate(
 		resourceGroupName,
@@ -35,7 +28,7 @@ func (az *AzureClient) DeployTemplate(resourceGroupName, deploymentName string, 
 	}
 	res := <-resChan
 
-	log.Infof("Finished ARM Deployment. deployment=%q. res=%q", deploymentName, res)
+	log.Infof("Finished ARM Deployment (%s).", deploymentName)
 
 	return &res, nil
 }
@@ -54,4 +47,14 @@ func (az *AzureClient) ValidateTemplate(
 		},
 	}
 	return az.deploymentsClient.Validate(resourceGroupName, deploymentName, deployment)
+}
+
+// GetDeployment returns the template deployment
+func (az *AzureClient) GetDeployment(resourceGroupName, deploymentName string) (result resources.DeploymentExtended, err error) {
+	return az.deploymentsClient.Get(resourceGroupName, deploymentName)
+}
+
+// CheckDeploymentExistence returns if the deployment already exists
+func (az *AzureClient) CheckDeploymentExistence(resourceGroupName string, deploymentName string) (result autorest.Response, err error) {
+	return az.deploymentsClient.CheckExistence(resourceGroupName, deploymentName)
 }

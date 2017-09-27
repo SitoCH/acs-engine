@@ -6,12 +6,15 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/arm/authorization"
 	"github.com/Azure/azure-sdk-for-go/arm/compute"
+	"github.com/Azure/azure-sdk-for-go/arm/graphrbac"
 	"github.com/Azure/azure-sdk-for-go/arm/network"
 	"github.com/Azure/azure-sdk-for-go/arm/resources/resources"
 	"github.com/Azure/azure-sdk-for-go/arm/resources/subscriptions"
@@ -20,10 +23,11 @@ import (
 	"github.com/Azure/go-autorest/autorest/adal"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
-	log "github.com/Sirupsen/logrus"
 	"github.com/mitchellh/go-homedir"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/Azure/acs-engine/pkg/acsengine"
+	"github.com/Azure/azure-sdk-for-go/arm/disk"
 )
 
 const (
@@ -42,16 +46,25 @@ var (
 // AzureClient implements the `ACSEngineClient` interface.
 // This client is backed by real Azure clients talking to an ARM endpoint.
 type AzureClient struct {
-	environment azure.Environment
+	acceptLanguages []string
+	environment     azure.Environment
+	subscriptionID  string
 
-	deploymentsClient     resources.DeploymentsClient
-	resourcesClient       resources.GroupClient
-	storageAccountsClient storage.AccountsClient
-	interfacesClient      network.InterfacesClient
-	groupsClient          resources.GroupsClient
-	providersClient       resources.ProvidersClient
-	subscriptionsClient   subscriptions.GroupClient
-	virtualMachinesClient compute.VirtualMachinesClient
+	authorizationClient           authorization.RoleAssignmentsClient
+	deploymentsClient             resources.DeploymentsClient
+	deploymentOperationsClient    resources.DeploymentOperationsClient
+	resourcesClient               resources.GroupClient
+	storageAccountsClient         storage.AccountsClient
+	interfacesClient              network.InterfacesClient
+	groupsClient                  resources.GroupsClient
+	providersClient               resources.ProvidersClient
+	subscriptionsClient           subscriptions.GroupClient
+	virtualMachinesClient         compute.VirtualMachinesClient
+	virtualMachineScaleSetsClient compute.VirtualMachineScaleSetsClient
+	disksClient                   disk.DisksClient
+
+	applicationsClient      graphrbac.ApplicationsClient
+	servicePrincipalsClient graphrbac.ServicePrincipalsClient
 }
 
 // NewAzureClientWithDeviceAuth returns an AzureClient by having a user complete a device authentication flow
@@ -82,11 +95,12 @@ func NewAzureClientWithDeviceAuth(env azure.Environment, subscriptionID string) 
 		if err != nil {
 			log.Warnf("Refresh token failed. Will fallback to device auth. %q", err)
 		} else {
-			adSpt, err := adal.NewServicePrincipalTokenFromManualToken(*oauthConfig, AcsEngineClientID, env.GraphEndpoint, armSpt.Token)
+			graphSpt, err := adal.NewServicePrincipalTokenFromManualToken(*oauthConfig, AcsEngineClientID, env.GraphEndpoint, armSpt.Token)
 			if err != nil {
 				return nil, err
 			}
-			return getClient(env, subscriptionID, armSpt, adSpt)
+			graphSpt.Refresh()
+			return getClient(env, subscriptionID, tenantID, armSpt, graphSpt)
 		}
 	}
 
@@ -110,17 +124,18 @@ func NewAzureClientWithDeviceAuth(env azure.Environment, subscriptionID string) 
 
 	adRawToken := armSpt.Token
 	adRawToken.Resource = env.GraphEndpoint
-	adSpt, err := adal.NewServicePrincipalTokenFromManualToken(*oauthConfig, AcsEngineClientID, env.GraphEndpoint, adRawToken)
+	graphSpt, err := adal.NewServicePrincipalTokenFromManualToken(*oauthConfig, AcsEngineClientID, env.GraphEndpoint, adRawToken)
 	if err != nil {
 		return nil, err
 	}
+	graphSpt.Refresh()
 
-	return getClient(env, subscriptionID, armSpt, adSpt)
+	return getClient(env, subscriptionID, tenantID, armSpt, graphSpt)
 }
 
 // NewAzureClientWithClientSecret returns an AzureClient via client_id and client_secret
 func NewAzureClientWithClientSecret(env azure.Environment, subscriptionID, clientID, clientSecret string) (*AzureClient, error) {
-	oauthConfig, _, err := getOAuthConfig(env, subscriptionID)
+	oauthConfig, tenantID, err := getOAuthConfig(env, subscriptionID)
 	if err != nil {
 		return nil, err
 	}
@@ -129,21 +144,17 @@ func NewAzureClientWithClientSecret(env azure.Environment, subscriptionID, clien
 	if err != nil {
 		return nil, err
 	}
-	adSpt, err := adal.NewServicePrincipalToken(*oauthConfig, clientID, clientSecret, env.GraphEndpoint)
+	graphSpt, err := adal.NewServicePrincipalToken(*oauthConfig, clientID, clientSecret, env.GraphEndpoint)
 	if err != nil {
 		return nil, err
 	}
+	graphSpt.Refresh()
 
-	return getClient(env, subscriptionID, armSpt, adSpt)
+	return getClient(env, subscriptionID, tenantID, armSpt, graphSpt)
 }
 
-// NewAzureClientWithClientCertificate returns an AzureClient via client_id and jwt certificate assertion
-func NewAzureClientWithClientCertificate(env azure.Environment, subscriptionID, clientID, certificatePath, privateKeyPath string) (*AzureClient, error) {
-	oauthConfig, _, err := getOAuthConfig(env, subscriptionID)
-	if err != nil {
-		return nil, err
-	}
-
+// NewAzureClientWithClientCertificateFile returns an AzureClient via client_id and jwt certificate assertion
+func NewAzureClientWithClientCertificateFile(env azure.Environment, subscriptionID, clientID, certificatePath, privateKeyPath string) (*AzureClient, error) {
 	certificateData, err := ioutil.ReadFile(certificatePath)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to read certificate: %q", err)
@@ -164,16 +175,35 @@ func NewAzureClientWithClientCertificate(env azure.Environment, subscriptionID, 
 		return nil, fmt.Errorf("Failed to parse rsa private key: %q", err)
 	}
 
-	armSpt, err := adal.NewServicePrincipalTokenFromCertificate(*oauthConfig, clientID, certificate, privateKey, env.ServiceManagementEndpoint)
-	if err != nil {
-		return nil, err
-	}
-	adSpt, err := adal.NewServicePrincipalTokenFromCertificate(*oauthConfig, clientID, certificate, privateKey, env.GraphEndpoint)
+	return NewAzureClientWithClientCertificate(env, subscriptionID, clientID, certificate, privateKey)
+}
+
+// NewAzureClientWithClientCertificate returns an AzureClient via client_id and jwt certificate assertion
+func NewAzureClientWithClientCertificate(env azure.Environment, subscriptionID, clientID string, certificate *x509.Certificate, privateKey *rsa.PrivateKey) (*AzureClient, error) {
+	oauthConfig, tenantID, err := getOAuthConfig(env, subscriptionID)
 	if err != nil {
 		return nil, err
 	}
 
-	return getClient(env, subscriptionID, armSpt, adSpt)
+	if certificate == nil {
+		return nil, fmt.Errorf("certificate should not be nil")
+	}
+
+	if privateKey == nil {
+		return nil, fmt.Errorf("privateKey  should not be nil")
+	}
+
+	armSpt, err := adal.NewServicePrincipalTokenFromCertificate(*oauthConfig, clientID, certificate, privateKey, env.ServiceManagementEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	graphSpt, err := adal.NewServicePrincipalTokenFromCertificate(*oauthConfig, clientID, certificate, privateKey, env.GraphEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	graphSpt.Refresh()
+
+	return getClient(env, subscriptionID, tenantID, armSpt, graphSpt)
 }
 
 func tokenCallback(path string) func(t adal.Token) error {
@@ -221,28 +251,46 @@ func getOAuthConfig(env azure.Environment, subscriptionID string) (*adal.OAuthCo
 	return oauthConfig, tenantID, nil
 }
 
-func getClient(env azure.Environment, subscriptionID string, armSpt *adal.ServicePrincipalToken, adSpt *adal.ServicePrincipalToken) (*AzureClient, error) {
+func getClient(env azure.Environment, subscriptionID, tenantID string, armSpt *adal.ServicePrincipalToken, graphSpt *adal.ServicePrincipalToken) (*AzureClient, error) {
 	c := &AzureClient{
-		environment:           env,
-		deploymentsClient:     resources.NewDeploymentsClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
-		resourcesClient:       resources.NewGroupClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
-		storageAccountsClient: storage.NewAccountsClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
-		interfacesClient:      network.NewInterfacesClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
-		groupsClient:          resources.NewGroupsClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
-		providersClient:       resources.NewProvidersClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
-		virtualMachinesClient: compute.NewVirtualMachinesClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		environment:    env,
+		subscriptionID: subscriptionID,
+
+		authorizationClient:           authorization.NewRoleAssignmentsClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		deploymentsClient:             resources.NewDeploymentsClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		deploymentOperationsClient:    resources.NewDeploymentOperationsClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		resourcesClient:               resources.NewGroupClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		storageAccountsClient:         storage.NewAccountsClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		interfacesClient:              network.NewInterfacesClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		groupsClient:                  resources.NewGroupsClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		providersClient:               resources.NewProvidersClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		virtualMachinesClient:         compute.NewVirtualMachinesClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		virtualMachineScaleSetsClient: compute.NewVirtualMachineScaleSetsClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+		disksClient:                   disk.NewDisksClientWithBaseURI(env.ResourceManagerEndpoint, subscriptionID),
+
+		applicationsClient:      graphrbac.NewApplicationsClientWithBaseURI(env.GraphEndpoint, tenantID),
+		servicePrincipalsClient: graphrbac.NewServicePrincipalsClientWithBaseURI(env.GraphEndpoint, tenantID),
 	}
 
 	authorizer := autorest.NewBearerAuthorizer(armSpt)
+	c.authorizationClient.Authorizer = authorizer
 	c.deploymentsClient.Authorizer = authorizer
+	c.deploymentOperationsClient.Authorizer = authorizer
 	c.resourcesClient.Authorizer = authorizer
 	c.storageAccountsClient.Authorizer = authorizer
 	c.interfacesClient.Authorizer = authorizer
 	c.groupsClient.Authorizer = authorizer
 	c.providersClient.Authorizer = authorizer
 	c.virtualMachinesClient.Authorizer = authorizer
+	c.virtualMachineScaleSetsClient.Authorizer = authorizer
+	c.disksClient.Authorizer = authorizer
 
 	c.deploymentsClient.PollingDelay = time.Second * 5
+	c.resourcesClient.PollingDelay = time.Second * 5
+
+	graphAuthorizer := autorest.NewBearerAuthorizer(graphSpt)
+	c.applicationsClient.Authorizer = graphAuthorizer
+	c.servicePrincipalsClient.Authorizer = graphAuthorizer
 
 	err := c.ensureProvidersRegistered(subscriptionID)
 	if err != nil {
@@ -274,7 +322,7 @@ func (az *AzureClient) ensureProvidersRegistered(subscriptionID string) error {
 		if registered {
 			log.Debugf("Already registered for %q", provider)
 		} else {
-			log.Info("Registering subscription to resource provider. provider=%q subscription=%q", provider, subscriptionID)
+			log.Infof("Registering subscription to resource provider. provider=%q subscription=%q", provider, subscriptionID)
 			if _, err := az.providersClient.Register(provider); err != nil {
 				return err
 			}
@@ -309,4 +357,42 @@ func parseRsaPrivateKey(path string) (*rsa.PrivateKey, error) {
 	}
 
 	return nil, fmt.Errorf("failed to parse private key as Pkcs#1 or Pkcs#8. (%s). (%s)", errPkcs1, errPkcs8)
+}
+
+//AddAcceptLanguages sets the list of languages to accept on this request
+func (az *AzureClient) AddAcceptLanguages(languages []string) {
+	az.acceptLanguages = languages
+	az.authorizationClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.deploymentOperationsClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.deploymentsClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.deploymentsClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.deploymentOperationsClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.resourcesClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.storageAccountsClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.interfacesClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.groupsClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.providersClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.virtualMachinesClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.virtualMachineScaleSetsClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.disksClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+
+	az.applicationsClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+	az.servicePrincipalsClient.ManagementClient.Client.RequestInspector = az.addAcceptLanguages()
+}
+
+func (az *AzureClient) addAcceptLanguages() autorest.PrepareDecorator {
+	return func(p autorest.Preparer) autorest.Preparer {
+		return autorest.PreparerFunc(func(r *http.Request) (*http.Request, error) {
+			r, err := p.Prepare(r)
+			if err != nil {
+				return r, err
+			}
+			if az.acceptLanguages != nil {
+				for _, language := range az.acceptLanguages {
+					r.Header.Add("Accept-Language", language)
+				}
+			}
+			return r, nil
+		})
+	}
 }

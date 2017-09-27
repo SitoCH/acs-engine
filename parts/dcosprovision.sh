@@ -7,7 +7,7 @@ mkdir $MESOSDIR
 . /etc/mesosphere/setup-flags/dcos-deploy-environment
 
 # default dc/os component download address (Azure CDN)
-DOCKER_ENGINE_DOWNLOAD_URL=https://az837203.vo.msecnd.net/dcos-deps/docker-engine_1.11.2-0~xenial_amd64.deb
+DOCKER_ENGINE_DOWNLOAD_URL=https://mesosphere.blob.core.windows.net/dcos-deps/docker-engine_1.13.1-0-ubuntu-xenial_amd64.deb
 LIBIPSET_DOWNLOAD_URL=https://az837203.vo.msecnd.net/dcos-deps/libipset3_6.29-1_amd64.deb
 IPSET_DOWNLOAD_URL=https://az837203.vo.msecnd.net/dcos-deps/ipset_6.29-1_amd64.deb
 UNZIP_DOWNLOAD_URL=https://az837203.vo.msecnd.net/dcos-deps/unzip_6.0-20ubuntu1_amd64.deb
@@ -42,3 +42,8 @@ for i in {1..300}; do
 done
 
 ROLESFILECONTENTS
+
+# add Azure update domain and fault domain attributes
+ud=$( curl -H Metadata:true "http://169.254.169.254/metadata/instance/compute/platformUpdateDomain?api-version=2017-04-02&format=text" )
+fd=$( curl -H Metadata:true "http://169.254.169.254/metadata/instance/compute/platformFaultDomain?api-version=2017-04-02&format=text" )
+echo ";azure.faultdomain:$fd;azure.updatedomain:$ud" >> /var/lib/dcos/mesos-slave-common

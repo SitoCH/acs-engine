@@ -1,6 +1,7 @@
 package v20160930
 
 import (
+	"encoding/json"
 	"fmt"
 	neturl "net/url"
 	"strings"
@@ -59,10 +60,13 @@ type LinuxProfile struct {
 	AdminUsername string `json:"adminUsername"`
 
 	SSH struct {
-		PublicKeys []struct {
-			KeyData string `json:"keyData"`
-		} `json:"publicKeys"`
+		PublicKeys []PublicKey `json:"publicKeys"`
 	} `json:"ssh"`
+}
+
+// PublicKey represents an SSH key for LinuxProfile
+type PublicKey struct {
+	KeyData string `json:"keyData"`
 }
 
 // WindowsProfile represents the Windows configuration passed to the cluster
@@ -92,7 +96,7 @@ const (
 
 // OrchestratorProfile contains Orchestrator properties
 type OrchestratorProfile struct {
-	OrchestratorType OrchestratorType `json:"orchestratorType"`
+	OrchestratorType string `json:"orchestratorType"`
 }
 
 // MasterProfile represents the definition of master cluster
@@ -109,6 +113,23 @@ type MasterProfile struct {
 	subnet string
 }
 
+// UnmarshalJSON unmarshal json using the default behavior
+// And do fields manipulation, such as populating default value
+func (m *MasterProfile) UnmarshalJSON(b []byte) error {
+	// Need to have a alias type to avoid circular unmarshal
+	type aliasMasterProfile MasterProfile
+	mm := aliasMasterProfile{}
+	if e := json.Unmarshal(b, &mm); e != nil {
+		return e
+	}
+	*m = MasterProfile(mm)
+	if m.Count == 0 {
+		// if MasterProfile.Count is missing or 0, set to default 1
+		m.Count = 1
+	}
+	return nil
+}
+
 // AgentPoolProfile represents configuration of VMs running agent
 // daemons that register with the master and offer resources to
 // host applications in containers.
@@ -117,7 +138,7 @@ type AgentPoolProfile struct {
 	Count     int    `json:"count"`
 	VMSize    string `json:"vmSize"`
 	DNSPrefix string `json:"dnsPrefix"`
-	FQDN      string `json:"fqdn,omitempty"`
+	FQDN      string `json:"fqdn"`
 
 	// OSType is the operating system type for agents
 	// Set as nullable to support backward compat because
@@ -127,6 +148,31 @@ type AgentPoolProfile struct {
 
 	// subnet is internal
 	subnet string
+}
+
+// UnmarshalJSON unmarshal json using the default behavior
+// And do fields manipulation, such as populating default value
+func (a *AgentPoolProfile) UnmarshalJSON(b []byte) error {
+	// Need to have a alias type to avoid circular unmarshal
+	type aliasAgentPoolProfile AgentPoolProfile
+	aa := aliasAgentPoolProfile{}
+	if e := json.Unmarshal(b, &aa); e != nil {
+		return e
+	}
+	*a = AgentPoolProfile(aa)
+	if a.Count == 0 {
+		// if AgentPoolProfile.Count is missing or 0, set it to default 1
+		a.Count = 1
+	}
+
+	if string(a.OSType) == "" {
+		// OSType is the operating system type for agents
+		// Set as nullable to support backward compat because
+		// this property was added later.
+		// If the value is null or not set, it defaulted to Linux.
+		a.OSType = Linux
+	}
+	return nil
 }
 
 // JumpboxProfile dscribes properties of the jumpbox setup
@@ -161,26 +207,31 @@ type VMDiagnostics struct {
 	StorageURL *neturl.URL `json:"storageUrl"`
 }
 
-// OrchestratorType defines orchestrators supported by ACS
-type OrchestratorType string
-
-// UnmarshalText decodes OrchestratorType text, do a case insensitive comparison with
-// the defined OrchestratorType constant and set to it if they equal
-func (o *OrchestratorType) UnmarshalText(text []byte) error {
-	s := string(text)
-	switch {
-	case strings.EqualFold(s, string(DCOS)):
-		*o = DCOS
-	case strings.EqualFold(s, string(Mesos)):
-		*o = Mesos
-	case strings.EqualFold(s, string(Swarm)):
-		*o = Swarm
-	case strings.EqualFold(s, string(Kubernetes)):
-		*o = Kubernetes
-	default:
-		return fmt.Errorf("OrchestratorType has unknown orchestrator: %s", s)
+// UnmarshalJSON unmarshal json using the default behavior
+// And do fields manipulation, such as populating default value
+func (o *OrchestratorProfile) UnmarshalJSON(b []byte) error {
+	// Need to have a alias type to avoid circular unmarshal
+	type aliasOrchestratorProfile OrchestratorProfile
+	op := aliasOrchestratorProfile{}
+	if e := json.Unmarshal(b, &op); e != nil {
+		return e
 	}
+	*o = OrchestratorProfile(op)
 
+	// Unmarshal OrchestratorType, format it as well
+	orchestratorType := o.OrchestratorType
+	switch {
+	case strings.EqualFold(orchestratorType, DCOS):
+		o.OrchestratorType = DCOS
+	case strings.EqualFold(orchestratorType, Swarm):
+		o.OrchestratorType = Swarm
+	case strings.EqualFold(orchestratorType, Kubernetes):
+		o.OrchestratorType = Kubernetes
+	case strings.EqualFold(orchestratorType, Mesos):
+		o.OrchestratorType = Mesos
+	default:
+		return fmt.Errorf("OrchestratorType has unknown orchestrator: %s", orchestratorType)
+	}
 	return nil
 }
 
@@ -215,6 +266,11 @@ func (a *AgentPoolProfile) IsWindows() bool {
 // IsLinux returns true if the agent pool is linux
 func (a *AgentPoolProfile) IsLinux() bool {
 	return a.OSType == Linux
+}
+
+// IsDCOS returns true if this template is for DCOS orchestrator
+func (o *OrchestratorProfile) IsDCOS() bool {
+	return o.OrchestratorType == DCOS
 }
 
 // GetSubnet returns the read-only subnet for the agent pool

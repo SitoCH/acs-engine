@@ -14,25 +14,19 @@ write_files:
   content: |
     [Service]
     ExecStart=
-    ExecStart=/usr/bin/docker daemon -H fd:// --storage-driver=overlay --log-driver=journald
-
-- path: "/etc/systemd/journald.conf.d/kubernetes.conf"
-  permissions: "0644"
-  owner: "root"
-  content: |
-    [Journal]
-    Storage=persistent
-    ForwardToSyslog=no
-    MaxLevelConsole=warning
-    RateLimitInterval=1s
-    RateLimitBurst=20000
+    ExecStart=/usr/bin/docker daemon -H fd:// --storage-driver=overlay2 --bip={{WrapAsVariable "dockerBridgeCidr"}}
 
 - path: "/etc/docker/daemon.json"
   permissions: "0644"
   owner: "root"
   content: |
     {
-      "live-restore": true
+      "live-restore": true,
+      "log-driver": "json-file",
+      "log-opts":  {
+         "max-size": "200m",
+         "max-file": "25"
+      }
     }
 
 - path: "/etc/kubernetes/certs/ca.crt"
@@ -106,15 +100,25 @@ write_files:
   permissions: "0644"
   owner: "root"
   content: |
-    KUBELET_CLUSTER_DNS={{WrapAsVariable "kubeDnsServiceIP"}}
+    KUBELET_CLUSTER_DNS={{WrapAsVariable "kubeDNSServiceIP"}}
     KUBELET_API_SERVERS=https://{{WrapAsVariable "kubernetesAPIServerIP"}}:443
     KUBELET_IMAGE={{WrapAsVariable "kubernetesHyperkubeSpec"}}
     KUBELET_NETWORK_PLUGIN=kubenet
+    KUBELET_MAX_PODS=110
     DOCKER_OPTS=
     CUSTOM_CMD=/bin/true
     KUBELET_REGISTER_SCHEDULABLE=true
-    KUBELET_NODE_LABELS=role=agent
+    KUBELET_NODE_LABELS={{ GetKubernetesLabels . }}
     KUBELET_POD_INFRA_CONTAINER_IMAGE={{WrapAsVariable "kubernetesPodInfraContainerSpec"}}
+    KUBELET_NODE_STATUS_UPDATE_FREQUENCY={{WrapAsVariable "kubernetesNodeStatusUpdateFrequency"}}
+    KUBE_CTRL_MGR_NODE_MONITOR_GRACE_PERIOD={{WrapAsVariable "kubernetesCtrlMgrNodeMonitorGracePeriod"}}
+    KUBE_CTRL_MGR_POD_EVICTION_TIMEOUT={{WrapAsVariable "kubernetesCtrlMgrPodEvictionTimeout"}}
+    KUBE_CTRL_MGR_ROUTE_RECONCILIATION_PERIOD={{WrapAsVariable "kubernetesCtrlMgrRouteReconciliationPeriod"}}
+    KUBELET_IMAGE_GC_HIGH_THRESHOLD={{WrapAsVariable "gchighthreshold"}}
+    KUBELET_IMAGE_GC_LOW_THRESHOLD={{WrapAsVariable "gclowthreshold"}}
+{{if IsKubernetesVersionGe "1.6.0"}}
+    KUBELET_FEATURE_GATES=--feature-gates=Accelerators=true
+{{end}}
 
 - path: "/etc/systemd/system/kubelet.service"
   permissions: "0644"
@@ -128,6 +132,12 @@ write_files:
   owner: "root"
   content: |
     #!/bin/bash
+
+{{if IsVNETIntegrated}}
+    # SNAT outbound traffic from pods to destinations outside of VNET.
+    iptables -t nat -A POSTROUTING -m iprange ! --dst-range 168.63.129.16 -m addrtype ! --dst-type local ! -d {{WrapAsVariable "vnetCidr"}} -j MASQUERADE
+{{end}}
+
     exit 0
 
 - path: "/opt/azure/containers/provision.sh"
@@ -137,7 +147,8 @@ write_files:
   content: !!binary |
     {{WrapAsVariable "provisionScript"}}
 
-runcmd:
+runcmd: 
+- apt-mark hold walinuxagent{{GetKubernetesAgentPreprovisionYaml .}}
 - apt-get update
 - apt-get install -y apt-transport-https ca-certificates nfs-common
 - systemctl enable rpcbind
@@ -153,4 +164,6 @@ runcmd:
 - systemctl restart docker
 - mkdir -p /etc/kubernetes/manifests
 - usermod -aG docker {{WrapAsVariable "username"}}
-
+- /usr/lib/apt/apt.systemd.daily
+- apt-mark unhold walinuxagent
+- mkdir -p /opt/azure/containers && touch /opt/azure/containers/runcmd.complete

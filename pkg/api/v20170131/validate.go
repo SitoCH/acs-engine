@@ -12,6 +12,7 @@ func (o *OrchestratorProfile) Validate() error {
 	case DCOS:
 	case Mesos:
 	case Swarm:
+	case SwarmMode:
 	case Kubernetes:
 	default:
 		return fmt.Errorf("OrchestratorProfile has unknown orchestrator: %s", o.OrchestratorType)
@@ -35,7 +36,7 @@ func (m *MasterProfile) Validate() error {
 }
 
 // Validate implements APIObject
-func (a *AgentPoolProfile) Validate(orchestratorType OrchestratorType) error {
+func (a *AgentPoolProfile) Validate(orchestratorType string) error {
 	if e := validateName(a.Name, "AgentPoolProfile.Name"); e != nil {
 		return e
 	}
@@ -80,6 +81,15 @@ func (l *LinuxProfile) Validate() error {
 
 // Validate implements APIObject
 func (a *Properties) Validate() error {
+	if a.OrchestratorProfile == nil {
+		return fmt.Errorf("missing OrchestratorProfile")
+	}
+	if a.MasterProfile == nil {
+		return fmt.Errorf("missing MasterProfile")
+	}
+	if a.LinuxProfile == nil {
+		return fmt.Errorf("missing LinuxProfile")
+	}
 	if e := a.OrchestratorProfile.Validate(); e != nil {
 		return e
 	}
@@ -90,12 +100,25 @@ func (a *Properties) Validate() error {
 		return e
 	}
 
+	if a.OrchestratorProfile.OrchestratorType == Kubernetes {
+		if a.ServicePrincipalProfile == nil {
+			return fmt.Errorf("ServicePrincipalProfile must be specified with Orchestrator %s", a.OrchestratorProfile.OrchestratorType)
+		}
+
+		if len(a.ServicePrincipalProfile.Secret) == 0 {
+			return fmt.Errorf("service principal client secret must be specified with Orchestrator %s", a.OrchestratorProfile.OrchestratorType)
+		}
+	}
+
 	for _, agentPoolProfile := range a.AgentPoolProfiles {
 		if e := agentPoolProfile.Validate(a.OrchestratorProfile.OrchestratorType); e != nil {
 			return e
 		}
 
 		if agentPoolProfile.OSType == Windows {
+			if a.WindowsProfile == nil {
+				return fmt.Errorf("missing WindowsProfile")
+			}
 			switch a.OrchestratorProfile.OrchestratorType {
 			case Swarm:
 			case Kubernetes:
@@ -163,17 +186,6 @@ func validateUniqueProfileNames(profiles []*AgentPoolProfile) error {
 			return fmt.Errorf("profile name '%s' already exists, profile names must be unique across pools", profile.Name)
 		}
 		profileNames[profile.Name] = true
-	}
-	return nil
-}
-
-func validateUniquePorts(ports []int, name string) error {
-	portMap := make(map[int]bool)
-	for _, port := range ports {
-		if _, ok := portMap[port]; ok {
-			return fmt.Errorf("agent profile '%s' has duplicate port '%d', ports must be unique", name, port)
-		}
-		portMap[port] = true
 	}
 	return nil
 }

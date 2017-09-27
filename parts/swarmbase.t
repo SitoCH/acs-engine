@@ -7,6 +7,7 @@
       {{template "windowsparams.t"}},
     {{end}}
     {{template "masterparams.t" .}}
+    {{template "swarmparams.t" .}}
   },
   "variables": {
     {{range $index, $agent := .AgentPoolProfiles}}
@@ -21,9 +22,7 @@
         {{end}}
     {{end}}
 
-    {{template "swarmmastervars.t" .}},
-    
-    {{GetSizeMap}}
+    {{template "swarmmastervars.t" .}}
   },
   "resources": [
     {{range .AgentPoolProfiles}}
@@ -45,6 +44,7 @@
   ],
   "outputs": {
     {{range .AgentPoolProfiles}}{{template "agentoutputs.t" .}}
-    {{end}}{{template "masteroutputs.t" .}}
+    {{end}}
+    {{template "masteroutputs.t" .}}
   }
 }

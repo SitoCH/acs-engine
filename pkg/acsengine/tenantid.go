@@ -7,10 +7,10 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/arm/resources/subscriptions"
 	"github.com/Azure/go-autorest/autorest/azure"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
-// findTenantID figures out the AAD tenant ID of the subscription by making an
+// GetTenantID figures out the AAD tenant ID of the subscription by making an
 // unauthenticated request to the Get Subscription Details endpoint and parses
 // the value from WWW-Authenticate header.
 func GetTenantID(env azure.Environment, subscriptionID string) (string, error) {

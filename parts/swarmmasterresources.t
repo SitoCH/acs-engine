@@ -1,15 +1,3 @@
-    {
-      "apiVersion": "[variables('apiVersionStorage')]",
-      "dependsOn": [
-        "[concat('Microsoft.Network/publicIPAddresses/', variables('masterPublicIPAddressName'))]"
-      ],
-      "location": "[variables('location')]",
-      "name": "[variables('masterStorageAccountName')]",
-      "properties": {
-        "accountType": "[variables('vmSizesMap')[variables('masterVMSize')].storageAccountType]"
-      },
-      "type": "Microsoft.Storage/storageAccounts"
-    },
 {{if not .MasterProfile.IsCustomVNET}}
     {
       "apiVersion": "[variables('apiVersionDefault')]",
@@ -28,6 +16,19 @@
       "type": "Microsoft.Network/virtualNetworks"
     },
 {{end}}
+{{if .MasterProfile.IsManagedDisks}}
+    {
+      "apiVersion": "[variables('apiVersionStorageManagedDisks')]",
+      "location": "[variables('location')]",
+      "name": "[variables('masterAvailabilitySet')]",
+      "properties": {
+        "platformFaultDomainCount": "2",
+        "platformUpdateDomainCount": "3",
+        "managed": "true"
+      },
+      "type": "Microsoft.Compute/availabilitySets"
+    },
+{{else if .MasterProfile.IsStorageAccount}}
     {
       "apiVersion": "[variables('apiVersionDefault')]",
       "location": "[variables('location')]",
@@ -35,6 +36,19 @@
       "properties": {},
       "type": "Microsoft.Compute/availabilitySets"
     },
+    {
+      "apiVersion": "[variables('apiVersionStorage')]",
+      "dependsOn": [
+        "[concat('Microsoft.Network/publicIPAddresses/', variables('masterPublicIPAddressName'))]"
+      ],
+      "location": "[variables('location')]",
+      "name": "[variables('masterStorageAccountName')]",
+      "properties": {
+        "accountType": "[variables('vmSizesMap')[variables('masterVMSize')].storageAccountType]"
+      },
+      "type": "Microsoft.Storage/storageAccounts"
+    },
+{{end}}
     {
       "apiVersion": "[variables('apiVersionDefault')]",
       "location": "[variables('location')]",
@@ -152,15 +166,21 @@
       "type": "Microsoft.Network/networkInterfaces"
     },
     {
-      "apiVersion": "[variables('apiVersionDefault')]",
+{{if .MasterProfile.IsManagedDisks}}
+    "apiVersion": "[variables('apiVersionStorageManagedDisks')]",
+{{else}}
+    "apiVersion": "[variables('apiVersionDefault')]",
+{{end}}
       "copy": {
         "count": "[variables('masterCount')]",
         "name": "vmLoopNode"
       },
       "dependsOn": [
         "[concat('Microsoft.Network/networkInterfaces/', variables('masterVMNamePrefix'), 'nic-', copyIndex())]",
-        "[concat('Microsoft.Compute/availabilitySets/',variables('masterAvailabilitySet'))]",
-        "[variables('masterStorageAccountName')]"
+        "[concat('Microsoft.Compute/availabilitySets/',variables('masterAvailabilitySet'))]"
+{{if .MasterProfile.IsStorageAccount}}
+        ,"[variables('masterStorageAccountName')]"
+{{end}}
       ],
       "tags":
       {
@@ -186,7 +206,9 @@
           "adminUsername": "[variables('adminUsername')]",
           "computername": "[concat(variables('masterVMNamePrefix'), copyIndex())]",
           {{if .OrchestratorProfile.IsSwarmMode}}
-            {{GetMasterSwarmModeCustomData}}
+            {{if not .MasterProfile.IsRHEL}}
+              {{GetMasterSwarmModeCustomData}}
+            {{end}}
           {{else}}
             {{GetMasterSwarmCustomData}}
           {{end}}
@@ -208,21 +230,30 @@
         },
         "storageProfile": {
           "imageReference": {
+            {{if .OrchestratorProfile.IsSwarmMode}}
+            "offer": "[variables('masterOSImageOffer')]",
+            "publisher": "[variables('masterOSImagePublisher')]",
+            "sku": "[variables('masterOSImageSKU')]",
+            "version": "[variables('masterOSImageVersion')]"
+            {{else}}
             "offer": "[variables('osImageOffer')]",
             "publisher": "[variables('osImagePublisher')]",
             "sku": "[variables('osImageSKU')]",
             "version": "[variables('osImageVersion')]"
+            {{end}}
           },
           "osDisk": {
-            "caching": "ReadWrite",
-            "createOption": "FromImage",
-{{if ne .MasterProfile.OSDiskSizeGB 0}}
-            "diskSizeGB": {{.MasterProfile.OSDiskSizeGB}},
-{{end}}
-            "name": "[concat(variables('masterVMNamePrefix'), copyIndex(),'-osdisk')]",
-            "vhd": {
+            "caching": "ReadWrite"
+            ,"createOption": "FromImage"
+{{if .MasterProfile.IsStorageAccount}}
+            ,"name": "[concat(variables('masterVMNamePrefix'), copyIndex(),'-osdisk')]"
+            ,"vhd": {
               "uri": "[concat(reference(concat('Microsoft.Storage/storageAccounts/', variables('masterStorageAccountName')), variables('apiVersionStorage')).primaryEndpoints.blob, 'vhds/', variables('masterVMNamePrefix'), copyIndex(), '-osdisk.vhd')]"
             }
+{{end}}           
+{{if ne .MasterProfile.OSDiskSizeGB 0}}
+            ,"diskSizeGB": {{.MasterProfile.OSDiskSizeGB}}
+{{end}}
           }
         }
       },
@@ -240,13 +271,17 @@
       "location": "[variables('location')]",
       "name": "[concat(variables('masterVMNamePrefix'), copyIndex(), '/configuremaster')]",
       "properties": {
-        "publisher": "Microsoft.OSTCExtensions",
+        "publisher": "Microsoft.Azure.Extensions",
         "settings": {
           "commandToExecute": "[variables('masterCustomScript')]",
-          "fileUris": []
+          "fileUris": [
+{{if .MasterProfile.IsRHEL}}
+            "[concat('{{ GetConfigurationScriptRootURL }}', variables('configureClusterScriptFile'))]"
+{{end}}
+          ]
         },
-        "type": "CustomScriptForLinux",
-        "typeHandlerVersion": "1.4"
+        "type": "CustomScript",
+        "typeHandlerVersion": "2.0"
       },
       "type": "Microsoft.Compute/virtualMachines/extensions"
     }
